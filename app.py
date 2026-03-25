@@ -146,6 +146,8 @@ def build_index(df, client, qdrant, prog, status):
 
 
 # ── RETRIEVE ───────────────────────────────────────────
+
+
 def retrieve(query, client, qdrant, k=5):
     try:
         q_emb = client.embeddings.create(
@@ -153,19 +155,18 @@ def retrieve(query, client, qdrant, k=5):
             input=[query]
         ).data[0].embedding
 
-        results = qdrant.search(
+        results = qdrant.query_points(
             collection_name=COLLECTION,
-            query_vector=q_emb,
+            query=q_emb,
             limit=k
         )
 
-        return [r.payload["text"] for r in results]
+        return [point.payload["text"] for point in results.points]
 
     except Exception as e:
         st.error("❌ Retrieval Error")
         st.code(str(e))
         return []
-
 
 # ── ANSWER ─────────────────────────────────────────────
 def answer(query, context, client):
