@@ -14,7 +14,7 @@ from openai import OpenAI
 # ---------------- CONFIG ----------------
 st.set_page_config(page_title="Inventory RAG Assistant", layout="wide")
 
-EXCEL_PATH = Path("Current_Inventory_.xlsx")
+EXCEL_PATH = Path("Current Inventory .xlsx")
 COLLECTION = "inventory"
 VECTOR_DIM = 384
 
