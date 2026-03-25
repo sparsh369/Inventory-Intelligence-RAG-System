@@ -12,7 +12,7 @@ from qdrant_client.models import Distance, VectorParams, PointStruct
 # ── CONFIG ─────────────────────────────────────────────
 st.set_page_config(page_title="Inventory RAG", page_icon="📦", layout="wide")
 
-COLLECTION = "inventory"
+COLLECTION = "Current Inventory .xlsx"
 EMBED_MODEL = "text-embedding-3-small"
 CHAT_MODEL = "gpt-4o-mini"
 EMBED_DIM = 1536
