@@ -74,13 +74,15 @@ def collection_exists(client):
     return COLLECTION in [c.name for c in client.get_collections().collections]
 
 def build_index(df, client):
-    if collection_exists(client):
-        return
-
     client.recreate_collection(
         collection_name=COLLECTION,
         vectors_config=VectorParams(size=1536, distance=Distance.COSINE),
     )
+
+    # client.recreate_collection(
+    #     collection_name=COLLECTION,
+    #     vectors_config=VectorParams(size=1536, distance=Distance.COSINE),
+    # )
 
     texts = [build_passage(row) for _, row in df.iterrows()]
     vectors = [get_embedding(text) for text in texts]
