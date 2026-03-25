@@ -20,7 +20,7 @@ CHUNK_SIZE = 10
 BATCH_SIZE = 64
 
 # 📁 DEFAULT FILE PATH (put your file here)
-DEFAULT_FILE = "inventory.xlsx"
+DEFAULT_FILE = "Current Inventory .xlsx"
 
 # ── LOAD API KEY FROM SECRETS ──────────────────────────
 openai_api_key = st.secrets["OPENAI_API_KEY"]
