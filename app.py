@@ -89,7 +89,7 @@ def build_filter(query: str):
 def collection_exists(client):
     return COLLECTION in [c.name for c in client.get_collections().collections]
 
-@st.cache_resource
+# @st.cache_resource
 def build_index(df, embedder, client):
     if collection_exists(client):
         return
