@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from pathlib import Path
-import json
 import time
 
 # ── Page config ────────────────────────────────────────────────────────────────
@@ -20,18 +19,18 @@ try:
         Distance, VectorParams, PointStruct, Filter,
         FieldCondition, MatchValue, Range
     )
-    from sentence_transformers import SentenceTransformer
-    import anthropic
+    from openai import OpenAI
 except ImportError as e:
     st.error(f"Missing dependency: {e}. Run `pip install -r requirements.txt`")
     st.stop()
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-EXCEL_PATH   = Path(__file__).parent / "Current_Inventory_.xlsx"
-COLLECTION   = "inventory"
-EMBED_MODEL  = "all-MiniLM-L6-v2"   # 384-dim, free, fast
-VECTOR_DIM   = 384
-TOP_K        = 8
+EXCEL_PATH     = Path(__file__).parent / "Current Inventory .xlsx"
+COLLECTION     = "inventory"
+EMBED_MODEL    = "text-embedding-3-small"   # OpenAI embedding model, 1536-dim
+VECTOR_DIM     = 1536
+CHAT_MODEL     = "gpt-4o"                   # OpenAI chat model
+TOP_K          = 8
 
 # Columns used to build the text passage for embedding
 TEXT_COLS = [
@@ -47,18 +46,13 @@ NUM_COLS = ["Shelf Stock", "Shelf Stock ($)", "GIT", "GIT ($)",
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-@st.cache_resource(show_spinner="Loading embedding model…")
-def load_embedder():
-    return SentenceTransformer(EMBED_MODEL)
-
 @st.cache_resource(show_spinner="Connecting to Qdrant…")
 def get_qdrant():
-    return QdrantClient(":memory:")   # in-memory; swap for host= for persistent
+    return QdrantClient(":memory:")  # in-memory; swap for host= for persistent
 
 @st.cache_data(show_spinner="Reading inventory file…")
 def load_dataframe():
     df = pd.read_excel(EXCEL_PATH, dtype=str)
-    # Coerce numeric columns back to float
     for col in NUM_COLS:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -72,7 +66,6 @@ def build_passage(row: pd.Series) -> str:
         val = str(row.get(col, "")).strip()
         if val and val != "nan":
             parts.append(f"{col.strip()}: {val}")
-    # Add key numeric fields as human-readable text
     for col in ["Shelf Stock", "Shelf Stock ($)", "DOH", "Safety Stock", "Demand"]:
         val = row.get(col, "")
         if val != "" and str(val) != "nan":
@@ -95,15 +88,27 @@ def build_payload(row: pd.Series, idx: int) -> dict:
             payload[col] = None
     return payload
 
-@st.cache_resource(show_spinner="Building vector index (first run may take a few minutes)…")
-def build_index(_df, _embedder, _client):
-    """Embed all rows and upsert into Qdrant. Cached so it only runs once."""
-    client   = _client
-    embedder = _embedder
-    df       = _df
+def get_openai_embeddings(texts: list[str], client: OpenAI) -> list[list[float]]:
+    """Batch embed texts using OpenAI text-embedding-3-small."""
+    # OpenAI allows up to 2048 inputs per request
+    BATCH = 512
+    all_vectors = []
+    for start in range(0, len(texts), BATCH):
+        batch = texts[start:start + BATCH]
+        response = client.embeddings.create(
+            model=EMBED_MODEL,
+            input=batch,
+        )
+        all_vectors.extend([item.embedding for item in response.data])
+    return all_vectors
 
-    # Create collection
-    client.recreate_collection(
+@st.cache_resource(show_spinner="Building vector index (first run may take a few minutes)…")
+def build_index(_df, _client_qdrant, _openai_api_key):
+    """Embed all rows with OpenAI and upsert into Qdrant. Cached so it only runs once."""
+    openai_client = OpenAI(api_key=_openai_api_key)
+    df = _df
+
+    _client_qdrant.recreate_collection(
         collection_name=COLLECTION,
         vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.COSINE),
     )
@@ -117,25 +122,31 @@ def build_index(_df, _embedder, _client):
         batch = df.iloc[start:end]
 
         passages = [build_passage(row) for _, row in batch.iterrows()]
-        vectors  = embedder.encode(passages, batch_size=64, show_progress_bar=False)
+        vectors  = get_openai_embeddings(passages, openai_client)
 
         points = [
             PointStruct(
                 id=int(start + i),
-                vector=vectors[i].tolist(),
+                vector=vectors[i],
                 payload=build_payload(row, start + i),
             )
             for i, (_, row) in enumerate(batch.iterrows())
         ]
-        client.upsert(collection_name=COLLECTION, points=points)
+        _client_qdrant.upsert(collection_name=COLLECTION, points=points)
         progress.progress(end / total, text=f"Indexed {end:,} / {total:,} rows…")
 
     progress.empty()
     return True
 
-def search_inventory(query: str, embedder, client, top_k=TOP_K) -> list[dict]:
-    vec = embedder.encode([query])[0].tolist()
-    results = client.search(
+def search_inventory(query: str, openai_client: OpenAI, qdrant_client, top_k=TOP_K) -> list[dict]:
+    """Embed query with OpenAI and search Qdrant."""
+    response = openai_client.embeddings.create(
+        model=EMBED_MODEL,
+        input=[query],
+    )
+    vec = response.data[0].embedding
+
+    results = qdrant_client.search(
         collection_name=COLLECTION,
         query_vector=vec,
         limit=top_k,
@@ -157,8 +168,8 @@ def format_context(hits: list[dict]) -> str:
         lines.append("")
     return "\n".join(lines)
 
-def ask_claude(question: str, context: str, api_key: str) -> str:
-    client = anthropic.Anthropic(api_key=api_key)
+def ask_openai(question: str, context: str, openai_client: OpenAI) -> str:
+    """Generate answer using OpenAI GPT-4o."""
     system = (
         "You are an expert inventory analyst assistant. "
         "You have been given retrieved inventory records as context. "
@@ -174,13 +185,15 @@ Question: {question}
 
 Answer based on the context above:"""
 
-    message = client.messages.create(
-        model="claude-sonnet-4-20250514",
+    response = openai_client.chat.completions.create(
+        model=CHAT_MODEL,
         max_tokens=1000,
-        system=system,
-        messages=[{"role": "user", "content": user_msg}],
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user",   "content": user_msg},
+        ],
     )
-    return message.content[0].text
+    return response.choices[0].message.content
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -188,15 +201,20 @@ with st.sidebar:
     st.title("⚙️ Configuration")
 
     api_key = st.text_input(
-        "Anthropic API Key",
+        "OpenAI API Key",
         type="password",
-        placeholder="sk-ant-…",
-        help="Get your key from console.anthropic.com",
+        placeholder="sk-…",
+        help="Get your key from platform.openai.com",
     )
 
     st.divider()
+    st.markdown("**Model info**")
+    st.caption(f"🔍 Embedding: `{EMBED_MODEL}`")
+    st.caption(f"🤖 Chat: `{CHAT_MODEL}`")
+
+    st.divider()
     st.markdown("**About this dataset**")
-    st.caption(f"📄 File: `Current_Inventory_.xlsx`")
+    st.caption("📄 File: `Current_Inventory_.xlsx`")
 
     if EXCEL_PATH.exists():
         st.success("✅ Inventory file found")
@@ -204,7 +222,7 @@ with st.sidebar:
         st.error("❌ Inventory file not found")
         st.stop()
 
-    top_k = st.slider("Top-K results to retrieve", 3, 20, TOP_K)
+    top_k    = st.slider("Top-K results to retrieve", 3, 20, TOP_K)
     show_raw = st.checkbox("Show retrieved rows", value=True)
 
     st.divider()
@@ -222,14 +240,20 @@ with st.sidebar:
             st.session_state["prefill"] = q
 
 # ── Initialize resources ────────────────────────────────────────────────────────
-df       = load_dataframe()
-embedder = load_embedder()
-qdrant   = get_qdrant()
-indexed  = build_index(df, embedder, qdrant)
+df     = load_dataframe()
+qdrant = get_qdrant()
+
+# Only build index once API key is provided
+if api_key:
+    openai_client = OpenAI(api_key=api_key)
+    indexed = build_index(df, qdrant, api_key)
+else:
+    openai_client = None
+    indexed = False
 
 # ── Main UI ────────────────────────────────────────────────────────────────────
 st.title("📦 Inventory RAG Assistant")
-st.caption(f"Semantic search over **{len(df):,} inventory records** · Powered by Qdrant + Claude")
+st.caption(f"Semantic search over **{len(df):,} inventory records** · Powered by Qdrant + OpenAI")
 
 # Dashboard metrics
 col1, col2, col3, col4 = st.columns(4)
@@ -261,11 +285,11 @@ for msg in st.session_state.messages:
 
 # Chat input
 prefill = st.session_state.pop("prefill", "")
-query = st.chat_input("Ask anything about the inventory…") or prefill
+query   = st.chat_input("Ask anything about the inventory…") or prefill
 
 if query:
     if not api_key:
-        st.warning("⚠️ Please enter your Anthropic API key in the sidebar.")
+        st.warning("⚠️ Please enter your OpenAI API key in the sidebar.")
         st.stop()
 
     # User message
@@ -276,11 +300,11 @@ if query:
     # Retrieve + generate
     with st.chat_message("assistant"):
         with st.spinner("Searching inventory…"):
-            hits = search_inventory(query, embedder, qdrant, top_k=top_k)
+            hits    = search_inventory(query, openai_client, qdrant, top_k=top_k)
             context = format_context(hits)
 
         with st.spinner("Generating answer…"):
-            answer = ask_claude(query, context, api_key)
+            answer = ask_openai(query, context, openai_client)
 
         st.markdown(answer)
 
